@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Taller Motor Pro</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#1976d2" />
+  <link rel="manifest" href="manifest.json">
+  <style>
+    :root { --primary: #2196f3; --bg: #121212; --card: #1e1e1e; --text: #e0e0e0; --accent: #00e5ff; }
+    body { font-family: 'Segoe UI', sans-serif; margin: 0; background: var(--bg); color: var(--text); }
+    header { background: linear-gradient(135deg, #1976d2, #00e5ff); color: #fff; padding: 1.5rem; text-align: center; font-weight: bold; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+    .container { padding: 1rem; max-width: 800px; margin: auto; }
+    form { background: var(--card); padding: 1.5rem; border-radius: 15px; display: grid; gap: 1rem; box-shadow: 0 8px 16px rgba(0,0,0,0.4); }
+    input, select, button { background: #2c2c2c; border: 1px solid #444; color: white; padding: 12px; border-radius: 8px; font-size: 1rem; }
+    button { background: var(--primary); border: none; font-weight: bold; cursor: pointer; transition: 0.2s; }
+    button:active { transform: scale(0.95); }
+    .btn-report { background: #2e7d32; } .btn-delete { background: #c62828; } .btn-backup { background: #455a64; }
+    .chart-container { background: var(--card); padding: 1rem; border-radius: 15px; margin: 1.5rem 0; height: 250px; }
+    table { width: 100%; border-collapse: separate; border-spacing: 0 8px; margin-top: 1rem; }
+    th { color: var(--accent); text-align: left; padding: 10px; }
+    tr { background: var(--card); }
+    td { padding: 12px; border-top: 1px solid #333; border-bottom: 1px solid #333; }
+    img { border-radius: 5px; object-fit: cover; }
+    #buscador { border-color: var(--primary); margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <header>🏎️ TALLER MOTOR PRO</header>
+  
+  <div class="container">
+    <form id="formCliente">
+      <input id="nombre" placeholder="Nombre del Cliente" required />
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+        <input id="doc" placeholder="Placa / Documento" required />
+        <input id="modelo" placeholder="Modelo del Auto" required />
+      </div>
+      <input id="fecha" type="date" required />
+      <select id="falla" required></select>
+      <label style="font-size: 0.8rem; color: #888;">Foto de la falla:</label>
+      <input id="foto" type="file" accept="image/*" capture="environment" />
+      <button type="submit">Guardar en Bitácora</button>
+    </form>
+
+    <div class="chart-container"><canvas id="chart"></canvas></div>
+    
+    <input type="text" id="buscador" placeholder="🔍 Buscar por nombre o placa..." style="width: 100%; box-sizing: border-box;">
+
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 15px;">
+      <button onclick="generarPDF()" class="btn-report">📄 Reporte PDF</button>
+      <button onclick="borrarTodo()" class="btn-delete">🗑️ Limpiar Todo</button>
+      <button onclick="exportarDatos()" class="btn-backup">📤 Exportar Backup</button>
+      <button onclick="document.getElementById('importFile').click()" class="btn-backup">📥 Importar</button>
+      <input type="file" id="importFile" style="display:none" accept=".json" onchange="importarDatos(event)">
+    </div>
+
+    <table id="tabla">
+      <thead><tr><th>Nombre</th><th>Auto</th><th>Falla</th><th>Foto</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.28/jspdf.plugin.autotable.min.js"></script>
+
+  <script>
+    const dbName="tallerDB", storeName="clientes";
+    const fallas=["Fuga de aceite","Biela doblada","Turbo dañado","Inyectores","Cadena desfasada","Frenos","Suspensión","Otro"];
+    let myChart = null;
+
+    const fallaSelect=document.getElementById("falla");
+    fallas.forEach(f=>{const o=document.createElement("option");o.value=o.textContent=f;fallaSelect.appendChild(o)});
+
+    function openDB(){
+      return new Promise((res)=>{
+        const req=indexedDB.open(dbName,2);
+        req.onupgradeneeded=()=>req.result.createObjectStore(storeName,{keyPath:"id",autoIncrement:true});
+        req.onsuccess=()=>res(req.result);
+      });
+    }
+
+    const optimizarImg = file => new Promise(res => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = e => {
+        const img = new Image();
+        img.src = e.target.result;
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const max = 800;
+          let w = img.width, h = img.height;
+          if (w > max) { h *= max/w; w = max; }
+          canvas.width = w; canvas.height = h;
+          canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+          res(canvas.toDataURL('image/jpeg', 0.7));
+        };
+      };
+    });
+
+    async function getClientes(){
+      const db = await openDB();
+      return new Promise(res => {
+        db.transaction(storeName).objectStore(storeName).getAll().onsuccess = e => res(e.target.result);
+      });
+    }
+
+    async function render(filtro = "") {
+      const rows = await getClientes();
+      const tb = document.querySelector("#tabla tbody");
+      tb.innerHTML = "";
+      const counts = {};
+
+      const filtrados = rows.filter(r => r.nombre.toLowerCase().includes(filtro.toLowerCase()) || r.doc.toLowerCase().includes(filtro.toLowerCase()));
+      
+      filtrados.forEach(r => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td>${r.nombre}</td><td>${r.modelo}<br><small style="color:var(--accent)">${r.doc}</small></td><td>${r.falla}</td>
+          <td>${r.foto ? `<img src="${r.foto}" width="50" height="50">` : "❌"}</td>
+          <td><button onclick="eliminarCliente(${r.id})" style="background:none; border:none; color:#ff5252; font-size:1.2rem;">🗑️</button></td>`;
+        tb.appendChild(tr);
+      });
+      
+      rows.forEach(r => counts[r.falla] = (counts[r.falla]||0)+1);
+      const ctx = document.getElementById("chart").getContext("2d");
+      if(myChart) myChart.destroy();
+      myChart = new Chart(ctx, { type:'bar', data:{ labels:Object.keys(counts), datasets:[{label:'Fallas', data:Object.values(counts), backgroundColor:'#2196f3', borderRadius:5}]}, options:{responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}}, scales:{y:{beginAtZero:true, grid:{color:'#333'}}}}});
+    }
+
+    document.getElementById("formCliente").addEventListener("submit", async e => {
+      e.preventDefault();
+      const fotoFile = document.getElementById("foto").files[0];
+      const cliente = {
+        nombre: document.getElementById("nombre").value,
+        doc: document.getElementById("doc").value,
+        modelo: document.getElementById("modelo").value,
+        fecha: document.getElementById("fecha").value,
+        falla: document.getElementById("falla").value,
+        foto: fotoFile ? await optimizarImg(fotoFile) : null
+      };
+      const db = await openDB();
+      const tx = db.transaction(storeName, "readwrite");
+      tx.objectStore(storeName).add(cliente);
+      tx.oncomplete = () => { e.target.reset(); render(); };
+    });
+
+    document.getElementById("buscador").addEventListener("input", e => render(e.target.value));
+
+    async function eliminarCliente(id) {
+      if(confirm("¿Eliminar este registro?")) {
+        const db = await openDB();
+        db.transaction(storeName, "readwrite").objectStore(storeName).delete(id).onsuccess = () => render();
+      }
+    }
+
+    async function borrarTodo() {
+      if(confirm("¡ALERTA! Se borrarán todos los datos. ¿Estás seguro?")) {
+        const db = await openDB();
+        db.transaction(storeName, "readwrite").objectStore(storeName).clear().onsuccess = () => render();
+      }
+    }
+
+    async function generarPDF() {
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF();
+      doc.setFontSize(18);
+      doc.text("Reporte Taller Motor Pro", 14, 20);
+      const chartImg = document.getElementById("chart").toDataURL("image/png");
+      doc.addImage(chartImg, 'PNG', 14, 30, 180, 60);
+      const rows = await getClientes();
+      doc.autoTable({ startY: 100, head: [['Nombre', 'Placa', 'Modelo', 'Falla']], body: rows.map(r=>[r.nombre, r.doc, r.modelo, r.falla]), theme:'grid' });
+      doc.save(`Reporte_Taller_${new Date().toLocaleDateString()}.pdf`);
+    }
+
+    async function exportarDatos() {
+      const datos = await getClientes();
+      const blob = new Blob([JSON.stringify(datos)], {type: "application/json"});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url; a.download = "backup_taller.json"; a.click();
+    }
+
+    function importarDatos(e) {
+      const reader = new FileReader();
+      reader.onload = async event => {
+        try {
+          const datos = JSON.parse(event.target.result);
+          const db = await openDB();
+          const tx = db.transaction(storeName, "readwrite");
+          datos.forEach(d => { delete d.id; tx.objectStore(storeName).add(d); });
+          tx.oncomplete = () => { alert("Importación completa"); render(); };
+        } catch(err) { alert("Error al importar"); }
+      };
+      reader.readAsText(e.target.files[0]);
+    }
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js').catch(console.error);
+    }
+    render();
+  </script>
+</body>
+</html>
